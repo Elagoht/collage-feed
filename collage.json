@@ -1,0 +1,6 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/feed",
+  "description": "A collage plugin that serves RSS 2.0 and Atom 1.0 feeds.",
+  "repository": "https://github.com/Elagoht/collage-feed"
+}
