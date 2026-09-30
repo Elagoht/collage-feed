@@ -160,3 +160,36 @@ func TestLimit(t *testing.T) {
 		t.Errorf("%d items, want 1", n)
 	}
 }
+
+// A feed with no BaseURL of its own falls back to the application's Config.BaseURL.
+func TestFeed_FallsBackToConfigBaseURL(t *testing.T) {
+	var calls atomic.Int64
+	app, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html": {Data: []byte(`<html><head>{{hoist "head"}}</head><body>x</body></html>`)},
+		}, Root: "t"},
+		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+		BaseURL: "https://fromconfig.example",
+		Plugins: []collage.Plugin{feed.New(feed.Feed{Title: "Blog", Link: "/blog", Items: items(&calls, "Hello")})}, // no BaseURL of its own
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(app, "/feed.xml")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /feed.xml = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<link>https://fromconfig.example/blog</link>`,
+		`<atom:link href="https://fromconfig.example/feed.xml"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("feed lacks %s, want the app's Config.BaseURL\n%s", want, body)
+		}
+	}
+}

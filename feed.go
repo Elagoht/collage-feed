@@ -45,7 +45,8 @@ type Feed struct {
 	// Language is the feed's language, as a BCP 47 tag: "en", "tr".
 	Language string
 	// BaseURL is the site's origin, "https://example.com": a feed's links are
-	// absolute, and the application cannot know its own host. Required.
+	// absolute, and the application cannot know its own host. Falls back to the
+	// application's Config.BaseURL when empty.
 	BaseURL string
 	// Link is the path of the page the feed is the feed of: "/blog". Default "/".
 	Link string
@@ -98,7 +99,7 @@ type Plugin struct {
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.1" }
+func (p *Plugin) Version() string                { return "0.1.2" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // ErrNoBaseURL is returned by Init for a feed without an absolute BaseURL.
@@ -121,6 +122,11 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	for i := range p.feeds {
 		f := &p.feeds[i]
 		f.defaults()
+		// The feed's own BaseURL wins; otherwise the application's Config.BaseURL,
+		// which collage validated and reports without a trailing slash.
+		if f.BaseURL == "" {
+			f.BaseURL = host.BaseURL()
+		}
 		base, err := url.Parse(f.BaseURL)
 		if f.BaseURL == "" || err != nil || base.Scheme == "" || base.Host == "" {
 			return fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
