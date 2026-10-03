@@ -7,4 +7,4 @@ module github.com/Elagoht/collage-feed
 
 go 1.26
 
-require github.com/Elagoht/collage v0.39.0
+require github.com/Elagoht/collage v0.42.0
