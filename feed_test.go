@@ -3,6 +3,7 @@ package feed_test
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -191,5 +192,78 @@ func TestFeed_FallsBackToConfigBaseURL(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("feed lacks %s, want the app's Config.BaseURL\n%s", want, body)
 		}
+	}
+}
+
+// origins resolves two hosts, as elagoht/tenant would.
+type origins struct{}
+
+func (origins) Name() string                             { return "test/origins" }
+func (origins) Version() string                          { return "0" }
+func (origins) Init(context.Context, collage.Host) error { return nil }
+func (origins) Shutdown(context.Context) error           { return nil }
+func (origins) Origin(_ context.Context, host string) (string, bool) {
+	switch host {
+	case "a.test":
+		return "https://a.example", true
+	case "b.test":
+		return "https://b.example", true
+	}
+	return "", false
+}
+
+func oneItem(context.Context) ([]feed.Item, error) {
+	return []feed.Item{{Title: "x", Link: "/x"}}, nil
+}
+
+// hostSite is the site of site(), with a resolver and a feed without a BaseURL,
+// built as an http.Handler.
+func hostSite(t *testing.T, plugins ...collage.Plugin) *collage.App {
+	t.Helper()
+	app, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html": {Data: []byte(`<html><head>{{hoist "head"}}</head><body>x</body></html>`)},
+		}, Root: "t"},
+		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+		Plugins: plugins,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func TestFeed_OriginFollowsHost(t *testing.T) {
+	h := hostSite(t, origins{}, feed.New(feed.Feed{Title: "T", Items: oneItem})).Handler()
+	for _, path := range []string{"/feed.xml", "/atom.xml"} {
+		for host, want := range map[string]string{"a.test": "https://a.example/x", "b.test": "https://b.example/x"} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://"+host+path, nil))
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Errorf("%s %s = %s, want %s", host, path, rec.Body.String(), want)
+			}
+		}
+	}
+}
+
+// Without a resolver or a Config.BaseURL, Init fails with ErrNoBaseURL.
+func TestFeed_NoOriginIsAnError(t *testing.T) {
+	app := hostSite(t, feed.New(feed.Feed{Title: "T", Items: oneItem}))
+	if err := app.Start(); !errors.Is(err, feed.ErrNoBaseURL) {
+		t.Fatalf("Start = %v, want ErrNoBaseURL", err)
+	}
+}
+
+// A feed's own BaseURL wins over the host's origin.
+func TestFeed_OwnBaseURLBeatsHostOrigin(t *testing.T) {
+	h := hostSite(t, origins{}, feed.New(feed.Feed{Title: "T", BaseURL: "https://own.example", Items: oneItem})).Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://a.test/feed.xml", nil))
+	if body := rec.Body.String(); !strings.Contains(body, "https://own.example/x") || strings.Contains(body, "a.example") {
+		t.Errorf("feed = %s, want the feed's own BaseURL", body)
 	}
 }

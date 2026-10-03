@@ -45,8 +45,8 @@ type Feed struct {
 	// Language is the feed's language, as a BCP 47 tag: "en", "tr".
 	Language string
 	// BaseURL is the site's origin, "https://example.com": a feed's links are
-	// absolute, and the application cannot know its own host. Falls back to the
-	// application's Config.BaseURL when empty.
+	// absolute. When empty, links follow the origin collage resolves for the
+	// request's host: a resolver plugin's (elagoht/tenant), else Config.BaseURL.
 	BaseURL string
 	// Link is the path of the page the feed is the feed of: "/blog". Default "/".
 	Link string
@@ -99,10 +99,11 @@ type Plugin struct {
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.2" }
+func (p *Plugin) Version() string                { return "0.2.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
-// ErrNoBaseURL is returned by Init for a feed without an absolute BaseURL.
+// ErrNoBaseURL is returned by Init for a feed with an invalid BaseURL, or with none
+// when collage can resolve no origin; and by a render that finds none.
 var ErrNoBaseURL = errors.New("feed: BaseURL is required: a feed's links are absolute")
 
 // ErrNoItems is returned by Init for a feed without an Items function.
@@ -122,13 +123,14 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	for i := range p.feeds {
 		f := &p.feeds[i]
 		f.defaults()
-		// The feed's own BaseURL wins; otherwise the application's Config.BaseURL,
-		// which collage validated and reports without a trailing slash.
-		if f.BaseURL == "" {
-			f.BaseURL = host.BaseURL()
-		}
-		base, err := url.Parse(f.BaseURL)
-		if f.BaseURL == "" || err != nil || base.Scheme == "" || base.Host == "" {
+		// The feed's own BaseURL wins; without one, links follow the origin
+		// collage resolves for the request's host, read per render.
+		if f.BaseURL != "" {
+			base, err := url.Parse(f.BaseURL)
+			if err != nil || base.Scheme == "" || base.Host == "" {
+				return fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
+			}
+		} else if !canResolve(host) {
 			return fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
 		}
 		if f.Items == nil {
@@ -138,8 +140,12 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		if f.RSS != "-" {
 			doc := collage.NewDocument(docName(f.Name, "rss"), "application/rss+xml; charset=utf-8").
 				AtRoot(f.RSS).
-				WithHandler(func(ctx context.Context, _ *collage.RenderContext) ([]byte, []string, error) {
-					return feed.render(ctx, feed.rss)
+				WithHandler(func(ctx context.Context, rc *collage.RenderContext) ([]byte, []string, error) {
+					local, err := feed.at(rc)
+					if err != nil {
+						return nil, nil, err
+					}
+					return local.render(ctx, local.rss)
 				}).
 				Static().
 				Build()
@@ -150,8 +156,12 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		if f.Atom != "-" {
 			doc := collage.NewDocument(docName(f.Name, "atom"), "application/atom+xml; charset=utf-8").
 				AtRoot(f.Atom).
-				WithHandler(func(ctx context.Context, _ *collage.RenderContext) ([]byte, []string, error) {
-					return feed.render(ctx, feed.atom)
+				WithHandler(func(ctx context.Context, rc *collage.RenderContext) ([]byte, []string, error) {
+					local, err := feed.at(rc)
+					if err != nil {
+						return nil, nil, err
+					}
+					return local.render(ctx, local.atom)
 				}).
 				Static().
 				Build()
@@ -161,6 +171,29 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		}
 	}
 	return nil
+}
+
+// at is the feed with its links absolute against rc's origin: its own BaseURL,
+// or collage's for the request's host.
+func (f Feed) at(rc *collage.RenderContext) (Feed, error) {
+	if f.BaseURL == "" {
+		f.BaseURL = collage.BaseURL(rc)
+		if f.BaseURL == "" {
+			return f, fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
+		}
+	}
+	return f, nil
+}
+
+// canResolve reports whether collage can name an origin without the plugin's
+// own BaseURL: from Config.BaseURL, or per host from a plugin implementing
+// collage.OriginResolver.
+func canResolve(host collage.Host) bool {
+	if host.BaseURL() != "" {
+		return true
+	}
+	origins, ok := host.(collage.Origins)
+	return ok && origins.Dynamic()
 }
 
 func docName(feed, format string) string {

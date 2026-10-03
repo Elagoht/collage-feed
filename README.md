@@ -17,7 +17,15 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.21.0 or later.
+Requires collage v0.42.0 or later.
+
+## Links and the origin
+
+A feed's links are absolute. `BaseURL` is the feed's own origin and always wins.
+Without one, links follow the origin collage resolves for the request's host: the
+one a resolver plugin such as elagoht/tenant names for that host, else the
+application's `Config.BaseURL`. One feed then serves each host its own links. With
+neither, the application fails to start with `ErrNoBaseURL`.
 
 ## Items
 
