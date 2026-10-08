@@ -24,8 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Elagoht/collage/pkg/collage"
@@ -64,17 +66,22 @@ type Feed struct {
 	Limit int
 	// NoDiscovery leaves the feed out of the pages' heads.
 	NoDiscovery bool
+
+	drops *dropLog
 }
 
 // Item is one entry of a feed.
 type Item struct {
 	// ID identifies the item for as long as it exists; a reader uses it to tell
-	// an item it has seen from a new one. Default: the item's absolute link.
+	// an item it has seen from a new one. Default: the item's absolute link. An
+	// ID that is a URL must be http or https, or a tag: or urn: name; one with
+	// another scheme is replaced by the default and logged.
 	ID string
 	// Title is the item's title, as text.
 	Title string
 	// Link is the item's page: a path on the site, "/blog/hello", or an absolute
-	// URL.
+	// http or https URL. A link with any other scheme — javascript:, data:,
+	// file: — is left out of the feed and logged.
 	Link string
 	// Summary is a short description, as text.
 	Summary string
@@ -93,18 +100,23 @@ type Item struct {
 // Plugin serves the feeds.
 type Plugin struct {
 	feeds []Feed
+	drops *dropLog
 }
 
 // New returns a plugin serving feeds.
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.0" }
+func (p *Plugin) Version() string                { return "0.2.1" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // ErrNoBaseURL is returned by Init for a feed with an invalid BaseURL, or with none
 // when collage can resolve no origin; and by a render that finds none.
 var ErrNoBaseURL = errors.New("feed: BaseURL is required: a feed's links are absolute")
+
+// ErrUnsafeLink is returned by Init for a feed whose Link, RSS or Atom is neither
+// a path on the site nor an http or https URL.
+var ErrUnsafeLink = errors.New("feed: a link must be a path on the site or an http or https URL")
 
 // ErrNoItems is returned by Init for a feed without an Items function.
 var ErrNoItems = errors.New("feed: Items is required")
@@ -120,9 +132,18 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 			seen[f.Name] = true
 		}
 	}
+	p.drops = &dropLog{log: host.Logger(), seen: make(map[string]bool)}
 	for i := range p.feeds {
 		f := &p.feeds[i]
 		f.defaults()
+		f.drops = p.drops
+		// The channel's links are the application's own, and RSS and Atom
+		// both require them: one that would be dropped is refused here.
+		for _, link := range []string{f.Link, f.RSS, f.Atom} {
+			if _, _, ok := checkLink(link); !ok {
+				return fmt.Errorf("%w (feed %q)", ErrUnsafeLink, f.Name)
+			}
+		}
 		// The feed's own BaseURL wins; without one, links follow the origin
 		// collage resolves for the request's host, read per render.
 		if f.BaseURL != "" {
@@ -255,22 +276,143 @@ func (f Feed) render(ctx context.Context, format func([]Item) ([]byte, error)) (
 	return body, f.Tags, err
 }
 
-// absolute makes a link on the site absolute; an absolute one is kept.
-func (f Feed) absolute(link string) string {
-	if u, err := url.Parse(link); err == nil && u.IsAbs() {
-		return link
+// link returns a link as the feed writes it: a path on the site made absolute
+// against BaseURL, or an absolute http or https URL. Any other link — a
+// javascript:, data: or file: URL, however its scheme is spelled, or one that does
+// not parse — is "", and logged once for item.
+func (f Feed) link(item, link string) string {
+	clean, scheme, ok := checkLink(link)
+	if !ok {
+		f.drops.warn(f.Name, item, scheme)
+		return ""
 	}
-	if !strings.HasPrefix(link, "/") {
-		link = "/" + link
+	if scheme != "" {
+		return clean
 	}
-	return f.BaseURL + link
+	if !strings.HasPrefix(clean, "/") {
+		clean = "/" + clean
+	}
+	return f.BaseURL + clean
 }
 
-func (f Feed) id(item Item) string {
+// id returns the item's id and whether it is its link. An explicit ID is kept
+// when it names no scheme, or is a tag: or urn: name or an http or https URL;
+// one with any other scheme is logged and replaced by the item's link, which
+// is "" when the link was dropped too.
+func (f Feed) id(item Item, link string) (string, bool) {
 	if item.ID != "" {
-		return item.ID
+		clean := normalise(item.ID)
+		switch scheme := schemeOf(clean); scheme {
+		case "":
+			return item.ID, false
+		case "tag", "urn":
+			return clean, false
+		case "http", "https":
+			if abs, _, ok := checkLink(clean); ok {
+				return abs, false
+			}
+			f.drops.warn(f.Name, item.Title, scheme)
+		default:
+			f.drops.warn(f.Name, item.Title, scheme)
+		}
 	}
-	return f.absolute(item.Link)
+	return link, link != ""
+}
+
+// checkLink reports whether link may be written, and how: an absolute http or
+// https URL, returned as clean with its scheme, or a reference with no scheme,
+// returned as clean with scheme "", for the caller to resolve against BaseURL.
+//
+// The scheme is found the way a browser finds it, not the way url.Parse does:
+// leading and trailing spaces and control characters are trimmed and every
+// tab and line break removed first, so "  JavaScript:" and "java\tscript:" are
+// javascript: URLs here as they are to the reader that follows them. Anything
+// url.Parse refuses is refused too, rather than taken for a path.
+func checkLink(link string) (clean, scheme string, ok bool) {
+	link = normalise(link)
+	scheme = schemeOf(link)
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", scheme, false
+	}
+	switch scheme {
+	case "":
+		if u.Scheme != "" || u.Opaque != "" {
+			return "", scheme, false
+		}
+		return link, "", true
+	case "http", "https":
+		if u.Host == "" || u.Opaque != "" {
+			return "", scheme, false
+		}
+		return u.String(), scheme, true
+	}
+	return "", scheme, false
+}
+
+// normalise does to a link what a browser's URL parser does before reading it:
+// trims leading and trailing C0 controls and spaces, and removes every tab, line
+// feed and carriage return.
+func normalise(link string) string {
+	link = strings.TrimFunc(link, func(r rune) bool { return r <= ' ' })
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, link)
+}
+
+// schemeOf returns the scheme a normalised link begins with, lower-cased: a
+// letter, then letters, digits, "+", "-" or ".", up to a colon. A link that
+// reaches "/", "?", "#" or any other character first has none.
+func schemeOf(link string) string {
+	for i := 0; i < len(link); i++ {
+		c := link[i]
+		switch {
+		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z':
+		case i > 0 && ('0' <= c && c <= '9' || c == '+' || c == '-' || c == '.'):
+		case i > 0 && c == ':':
+			return strings.ToLower(link[:i])
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
+// dropLog logs a dropped link once per feed, item and scheme, however many times
+// and in however many formats the feed is made.
+type dropLog struct {
+	log  *slog.Logger
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+// maxDrops bounds what dropLog remembers; past it, it forgets and may log again.
+const maxDrops = 4096
+
+func (d *dropLog) warn(feed, item, scheme string) {
+	if d == nil || d.log == nil {
+		return
+	}
+	key := feed + "\x00" + item + "\x00" + scheme
+	d.mu.Lock()
+	if d.seen[key] {
+		d.mu.Unlock()
+		return
+	}
+	if len(d.seen) >= maxDrops {
+		clear(d.seen)
+	}
+	d.seen[key] = true
+	d.mu.Unlock()
+	reason := "only http and https are written"
+	if scheme == "" {
+		reason = "not a URL"
+	}
+	// Never the link itself: it is what an attacker wrote.
+	d.log.Warn("feed: link dropped", "feed", feed, "item", item, "scheme", scheme, "reason", reason)
 }
 
 // updated is when the feed last changed: its newest item's time.
@@ -317,8 +459,8 @@ type rssSelf struct {
 
 type rssItem struct {
 	Title       string   `xml:"title"`
-	Link        string   `xml:"link"`
-	GUID        rssGUID  `xml:"guid"`
+	Link        string   `xml:"link,omitempty"`
+	GUID        *rssGUID `xml:"guid,omitempty"`
 	PubDate     string   `xml:"pubDate,omitempty"`
 	Description string   `xml:"description,omitempty"`
 	Content     *cdata   `xml:"content:encoded,omitempty"`
@@ -343,23 +485,26 @@ func (f Feed) rss(items []Item) ([]byte, error) {
 		DC:      "http://purl.org/dc/elements/1.1/",
 		Channel: rssChannel{
 			Title:       f.Title,
-			Link:        f.absolute(f.Link),
+			Link:        f.link("", f.Link),
 			Description: f.Description,
 			Language:    f.Language,
-			Self:        rssSelf{Href: f.absolute(f.RSS), Rel: "self", Type: "application/rss+xml"},
+			Self:        rssSelf{Href: f.link("", f.RSS), Rel: "self", Type: "application/rss+xml"},
 		},
 	}
 	if t := updated(items); !t.IsZero() {
 		doc.Channel.LastBuildDate = t.UTC().Format(time.RFC1123Z)
 	}
 	for _, item := range items {
+		link := f.link(item.Title, item.Link)
 		entry := rssItem{
 			Title:       item.Title,
-			Link:        f.absolute(item.Link),
-			GUID:        rssGUID{Value: f.id(item), Permalink: item.ID == ""},
+			Link:        link,
 			Description: item.Summary,
 			Creator:     item.Author,
 			Categories:  item.Categories,
+		}
+		if id, permalink := f.id(item, link); id != "" {
+			entry.GUID = &rssGUID{Value: id, Permalink: permalink}
 		}
 		if !item.Published.IsZero() {
 			entry.PubDate = item.Published.UTC().Format(time.RFC1123Z)
@@ -394,7 +539,7 @@ type atomLink struct {
 type atomEntry struct {
 	Title      string         `xml:"title"`
 	ID         string         `xml:"id"`
-	Link       atomLink       `xml:"link"`
+	Link       *atomLink      `xml:"link,omitempty"`
 	Updated    string         `xml:"updated"`
 	Published  string         `xml:"published,omitempty"`
 	Author     *atomAuthor    `xml:"author,omitempty"`
@@ -426,12 +571,12 @@ func (f Feed) atom(items []Item) ([]byte, error) {
 	doc := atomFeed{
 		Lang:    f.Language,
 		Title:   f.Title,
-		ID:      f.absolute(f.Link),
+		ID:      f.link("", f.Link),
 		Updated: feedUpdated.UTC().Format(time.RFC3339),
 		Sub:     f.Description,
 		Links: []atomLink{
-			{Href: f.absolute(f.Atom), Rel: "self", Type: "application/atom+xml"},
-			{Href: f.absolute(f.Link), Rel: "alternate", Type: "text/html"},
+			{Href: f.link("", f.Atom), Rel: "self", Type: "application/atom+xml"},
+			{Href: f.link("", f.Link), Rel: "alternate", Type: "text/html"},
 		},
 	}
 	for _, item := range items {
@@ -442,12 +587,21 @@ func (f Feed) atom(items []Item) ([]byte, error) {
 		if changed.IsZero() {
 			changed = feedUpdated
 		}
+		link := f.link(item.Title, item.Link)
+		id, _ := f.id(item, link)
+		if id == "" {
+			// Atom requires an entry's id, and the link it would default to was
+			// dropped: the entry is left out. RSS keeps it, without a link.
+			continue
+		}
 		entry := atomEntry{
 			Title:   item.Title,
-			ID:      f.id(item),
-			Link:    atomLink{Href: f.absolute(item.Link), Rel: "alternate", Type: "text/html"},
+			ID:      id,
 			Updated: changed.UTC().Format(time.RFC3339),
 			Summary: item.Summary,
+		}
+		if link != "" {
+			entry.Link = &atomLink{Href: link, Rel: "alternate", Type: "text/html"}
 		}
 		if !item.Published.IsZero() {
 			entry.Published = item.Published.UTC().Format(time.RFC3339)

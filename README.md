@@ -17,7 +17,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.42.0 or later.
+Requires collage v0.55.0 or later.
 
 ## Links and the origin
 
@@ -56,6 +56,28 @@ func latestPosts(ctx context.Context) ([]feed.Item, error) {
 
 An item's `ID` defaults to its absolute link; set it when the link can change. A
 feed carries at most `Limit` items, 20 by default.
+
+## Only http and https
+
+A feed reader shows an item's link as something to click, so a link is written only
+when it is a path on the site — made absolute against the origin — or an absolute
+`http` or `https` URL. Any other scheme, `javascript:`, `data:`, `vbscript:`,
+`file:` and the rest, is dropped, however it is spelled: the scheme is read the way
+a browser reads it, after trimming spaces and control characters and removing tabs
+and line breaks, so `  JavaScript:` and `java<TAB>script:` are caught too. A link
+that does not parse as a URL is dropped as well.
+
+This covers every URL the feed writes. An item whose link is dropped stays in the
+RSS feed without a `link`, and without a `guid` unless it has an `ID`; Atom requires
+an entry's `id`, so such an entry is left out of the Atom feed. An explicit `ID`
+that is a URL must be `http` or `https`, or a `tag:` or `urn:` name; one with
+another scheme is replaced by the item's link. An `ID` with no scheme, `post-42`,
+is kept as it is.
+
+Each dropped link is logged once at `WARN` with the feed, the item's title and the
+scheme, never the link itself. A feed's own `Link`, `RSS` or `Atom` that would be
+dropped stops the application from starting with `ErrUnsafeLink`: RSS and Atom
+both require the channel's link.
 
 ## Where the feeds are
 
@@ -98,3 +120,17 @@ app.InvalidateTags(ctx, "posts")
   `content type="html"`, and `category`.
 
 Feeds are configured in Go, since `Items` is a function.
+
+## Changes
+
+### v0.2.1
+
+- **Links are written only as `http` or `https`.** An item link, a URL-shaped
+  `ID`, the channel link and the `atom:link` with any other scheme —
+  `javascript:`, `data:`, `vbscript:`, `file:`, in any case and with spaces,
+  tabs or line breaks worked in — are dropped and logged once at `WARN` with the
+  scheme, not the link. Before, an absolute link of any scheme was written as it
+  was. A feed's own `Link`, `RSS` or `Atom` with such a scheme stops the
+  application from starting (`ErrUnsafeLink`). See
+  [Only http and https](#only-http-and-https).
+- Requires collage v0.55.0.
