@@ -107,7 +107,7 @@ type Plugin struct {
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.1" }
+func (p *Plugin) Version() string                { return "0.2.2" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // ErrNoBaseURL is returned by Init for a feed with an invalid BaseURL, or with none
@@ -345,7 +345,10 @@ func checkLink(link string) (clean, scheme string, ok bool) {
 		if u.Host == "" || u.Opaque != "" {
 			return "", scheme, false
 		}
-		return u.String(), scheme, true
+		// As given, not u.String(): that re-encodes a non-ASCII path, and a
+		// guid that changes spelling is a new item to every reader. Only the
+		// scheme is lower-cased.
+		return scheme + link[len(scheme):], scheme, true
 	}
 	return "", scheme, false
 }

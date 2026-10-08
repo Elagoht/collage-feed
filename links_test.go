@@ -223,3 +223,22 @@ func TestUnsafeChannelLinkIsRefused(t *testing.T) {
 		t.Errorf("the absolute channel link was not kept:\n%s", body)
 	}
 }
+
+// An absolute link or ID is written as given, not re-encoded: a guid that changes
+// spelling makes every reader show the item again as new.
+func TestAbsoluteLinksAreWrittenAsGiven(t *testing.T) {
+	app, _ := loggedSite(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Items: func(context.Context) ([]feed.Item, error) {
+		return []feed.Item{
+			{Title: "çay", Link: "https://tr.example/blog/çay-demlemek"},
+			{Title: "ğ", ID: "https://tr.example/id/ğüşiöç", Link: "/x"},
+		}, nil
+	}})
+	for _, path := range []string{"/feed.xml", "/atom.xml"} {
+		body := get(app, path).Body.String()
+		for _, want := range []string{"https://tr.example/blog/çay-demlemek", "https://tr.example/id/ğüşiöç"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s lacks %s as given:\n%s", path, want, body)
+			}
+		}
+	}
+}

@@ -123,6 +123,12 @@ Feeds are configured in Go, since `Items` is a function.
 
 ## Changes
 
+### v0.2.2
+
+- An absolute `http` or `https` link or `ID` is written as given again. v0.2.1
+  re-encoded it, so a non-ASCII path such as `/blog/çay` became `/blog/%C3%A7ay`,
+  and a reader would show the item as new. Only the scheme's case is changed.
+
 ### v0.2.1
 
 - **Links are written only as `http` or `https`.** An item link, a URL-shaped
