@@ -267,3 +267,33 @@ func TestFeed_OwnBaseURLBeatsHostOrigin(t *testing.T) {
 		t.Errorf("feed = %s, want the feed's own BaseURL", body)
 	}
 }
+
+// With no feeds, as "collage plugin add" writes feed.New(), Init says once where
+// they go, and serves nothing.
+func TestNoFeedsWarnsOnce(t *testing.T) {
+	app, logs := loggedSite(t)
+	for range 2 {
+		if rec := get(app, "/feed.xml"); rec.Code != http.StatusNotFound {
+			t.Errorf("GET /feed.xml = %d, want 404", rec.Code)
+		}
+	}
+	const want = "feed: no feeds; pass them to feed.New in plugins.go"
+	var warns []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "level=WARN") {
+			warns = append(warns, line)
+		}
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], `msg="`+want+`"`) {
+		t.Errorf("warnings = %q, want one: %s", warns, want)
+	}
+}
+
+// A feed silences it.
+func TestAFeedDoesNotWarn(t *testing.T) {
+	app, logs := loggedSite(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Items: oneItem})
+	get(app, "/feed.xml")
+	if strings.Contains(logs.String(), "no feeds") {
+		t.Errorf("warned with a feed:\n%s", logs.String())
+	}
+}

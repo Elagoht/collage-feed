@@ -107,7 +107,7 @@ type Plugin struct {
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.2" }
+func (p *Plugin) Version() string                { return "0.2.3" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // ErrNoBaseURL is returned by Init for a feed with an invalid BaseURL, or with none
@@ -123,6 +123,12 @@ var ErrNoItems = errors.New("feed: Items is required")
 
 // Init registers each feed's documents.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
+	if len(p.feeds) == 0 {
+		// feed.New(), as "collage plugin add" writes it: feeds are Go values,
+		// which plugins-config.json cannot hold.
+		host.Logger().Warn("feed: no feeds; pass them to feed.New in plugins.go")
+		return nil
+	}
 	if len(p.feeds) > 1 {
 		seen := make(map[string]bool)
 		for _, f := range p.feeds {

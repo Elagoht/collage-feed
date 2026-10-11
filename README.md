@@ -17,7 +17,11 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.55.0 or later.
+Requires collage v0.58.0 or later.
+
+`collage plugin add elagoht/feed` writes `feed.New()` into `plugins.go`. Feeds are
+Go values, so give them to `feed.New(...)` there; with none, the plugin logs one
+warning at startup and serves nothing.
 
 ## Links and the origin
 
@@ -122,6 +126,14 @@ app.InvalidateTags(ctx, "posts")
 Feeds are configured in Go, since `Items` is a function.
 
 ## Changes
+
+### v0.2.3
+
+- With no feeds, as `collage plugin add` writes `feed.New()`, `Init` logs one
+  `WARN`, `feed: no feeds; pass them to feed.New in plugins.go`, and serves
+  nothing.
+- collage.json has a `setup` note, which `collage plugin add` prints.
+- Built against collage v0.58.0. Requires it.
 
 ### v0.2.2
 
