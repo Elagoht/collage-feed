@@ -5,11 +5,11 @@ lists, and announces them in every page's head.
 
 ```go
 app, err := collage.New(&collage.Config{
+	BaseURL: "https://example.com",
 	Plugins: []collage.Plugin{feed.New(feed.Feed{
 		Title:       "The blog",
 		Description: "What we are working on",
 		Language:    "en",
-		BaseURL:     "https://example.com",
 		Link:        "/blog",
 		Items:       latestPosts,
 		Tags:        []string{"posts"},
@@ -17,7 +17,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.58.0 or later.
+Requires collage v0.61.0 or later.
 
 `collage plugin add elagoht/feed` writes `feed.New()` into `plugins.go`. Feeds are
 Go values, so give them to `feed.New(...)` there; with none, the plugin logs one
@@ -25,11 +25,11 @@ warning at startup and serves nothing.
 
 ## Links and the origin
 
-A feed's links are absolute. `BaseURL` is the feed's own origin and always wins.
-Without one, links follow the origin collage resolves for the request's host: the
-one a resolver plugin such as elagoht/tenant names for that host, else the
-application's `Config.BaseURL`. One feed then serves each host its own links. With
-neither, the application fails to start with `ErrNoBaseURL`.
+A feed's links are absolute. They follow the origin collage resolves for the
+request's host: the one a resolver plugin such as elagoht/tenant names for that
+host, else the application's `Config.BaseURL` (`BASE_URL`). One feed then serves
+each host its own links. With neither, the application fails to start with
+`ErrNoBaseURL`.
 
 ## Items
 
@@ -45,7 +45,7 @@ func latestPosts(ctx context.Context) ([]feed.Item, error) {
 	for _, p := range posts {
 		items = append(items, feed.Item{
 			Title:      p.Title,
-			Link:       "/blog/" + p.Slug, // made absolute with BaseURL
+			Link:       "/blog/" + p.Slug, // made absolute under the site's origin
 			Summary:    p.Dek,
 			Content:    p.HTML, // template.HTML: the full body, optional
 			Author:     p.Author,
@@ -126,6 +126,16 @@ app.InvalidateTags(ctx, "posts")
 Feeds are configured in Go, since `Items` is a function.
 
 ## Changes
+
+### v0.3.0
+
+Changed in v0.3.0:
+
+- `Feed.BaseURL` is gone. A feed's links are absolute under collage's own origin:
+  set `Config.BaseURL` (`BASE_URL`), or register an origin resolver. A feed that
+  set `BaseURL` to something other than the site's origin has no replacement.
+- `ErrNoBaseURL` now means only that collage can name no origin.
+- Requires collage v0.61.0.
 
 ### v0.2.4
 

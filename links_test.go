@@ -4,53 +4,20 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
-	"testing/fstest"
-	"time"
 
 	feed "github.com/Elagoht/collage-feed"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
-// syncBuffer is a log destination safe for concurrent writes.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
-}
-
-// loggedSite is site() with the application's log written to the returned buffer.
-func loggedSite(t *testing.T, feeds ...feed.Feed) (*collage.App, *syncBuffer) {
+// loggedSite is site() with what the application logged.
+func loggedSite(t *testing.T, feeds ...feed.Feed) (*collage.App, *collagetest.Logs) {
 	t.Helper()
-	logs := &syncBuffer{}
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<html><head>{{hoist "head"}}</head><body>x</body></html>`)},
-		}, Root: "t"},
-		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Logger:  slog.New(slog.NewTextHandler(logs, nil)),
-		Plugins: []collage.Plugin{feed.New(feeds...)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return app, logs
+	site := collagetest.NewSite(t, siteOptions("https://example.com", feed.New(feeds...))...)
+	return site.App, site.Logs
 }
 
 // dangerous are links a reader must never be handed, each carrying PAYLOAD so
@@ -129,10 +96,10 @@ func written(t *testing.T, body []byte) []string {
 }
 
 // TestDangerousLinksAreDropped: only http and https links reach a feed, however
-// the scheme is spelled; relative links resolve against BaseURL; an explicit ID
+// the scheme is spelled; relative links resolve against Config.BaseURL; an explicit ID
 // may be a tag: or urn: name or a plain string, but not another scheme.
 func TestDangerousLinksAreDropped(t *testing.T) {
-	app, logs := loggedSite(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Link: "/blog", Items: dangerousItems, Limit: 100})
+	app, logs := loggedSite(t, feed.Feed{Title: "Blog", Link: "/blog", Items: dangerousItems, Limit: 100})
 	for _, path := range []string{"/feed.xml", "/atom.xml", "/feed.xml"} {
 		rec := get(app, path)
 		if rec.Code != http.StatusOK {
@@ -188,7 +155,7 @@ func TestDangerousLinksAreDropped(t *testing.T) {
 // An item whose link was dropped is still in the RSS feed, without a link or a
 // guid; Atom requires an entry's id, so there it is left out.
 func TestItemWithoutLinkOrID(t *testing.T) {
-	app, _ := loggedSite(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Items: func(context.Context) ([]feed.Item, error) {
+	app, _ := loggedSite(t, feed.Feed{Title: "Blog", Items: func(context.Context) ([]feed.Item, error) {
 		return []feed.Item{{Title: "lost", Link: "javascript:PAYLOAD()"}, {Title: "kept", Link: "/kept"}}, nil
 	}})
 	rss := get(app, "/feed.xml").Body.String()
@@ -208,17 +175,17 @@ func TestItemWithoutLinkOrID(t *testing.T) {
 // path on the site stops the application from starting.
 func TestUnsafeChannelLinkIsRefused(t *testing.T) {
 	for _, f := range []feed.Feed{
-		{Title: "T", BaseURL: "https://example.com", Link: "javascript:PAYLOAD()", Items: oneItem},
-		{Title: "T", BaseURL: "https://example.com", Link: " JavaScript:PAYLOAD()", Items: oneItem},
-		{Title: "T", BaseURL: "https://example.com", Link: "data:,PAYLOAD", Items: oneItem},
+		{Title: "T", Link: "javascript:PAYLOAD()", Items: oneItem},
+		{Title: "T", Link: " JavaScript:PAYLOAD()", Items: oneItem},
+		{Title: "T", Link: "data:,PAYLOAD", Items: oneItem},
 	} {
-		app := hostSite(t, feed.New(f))
-		if err := app.Start(); !errors.Is(err, feed.ErrUnsafeLink) {
+		_, err := collagetest.TrySite(t, siteOptions("https://example.com", feed.New(f))...)
+		if !errors.Is(err, feed.ErrUnsafeLink) {
 			t.Errorf("Link %q: Start = %v, want ErrUnsafeLink", f.Link, err)
 		}
 	}
 	// An absolute http(s) channel link is still allowed.
-	app, _ := loggedSite(t, feed.Feed{Title: "T", BaseURL: "https://example.com", Link: "https://www.example.com/blog", Items: oneItem})
+	app, _ := loggedSite(t, feed.Feed{Title: "T", Link: "https://www.example.com/blog", Items: oneItem})
 	if body := get(app, "/feed.xml").Body.String(); !strings.Contains(body, "<link>https://www.example.com/blog</link>") {
 		t.Errorf("the absolute channel link was not kept:\n%s", body)
 	}
@@ -227,7 +194,7 @@ func TestUnsafeChannelLinkIsRefused(t *testing.T) {
 // An absolute link or ID is written as given, not re-encoded: a guid that changes
 // spelling makes every reader show the item again as new.
 func TestAbsoluteLinksAreWrittenAsGiven(t *testing.T) {
-	app, _ := loggedSite(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Items: func(context.Context) ([]feed.Item, error) {
+	app, _ := loggedSite(t, feed.Feed{Title: "Blog", Items: func(context.Context) ([]feed.Item, error) {
 		return []feed.Item{
 			{Title: "çay", Link: "https://tr.example/blog/çay-demlemek"},
 			{Title: "ğ", ID: "https://tr.example/id/ğüşiöç", Link: "/x"},

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	feed "github.com/Elagoht/collage-feed"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 var published = time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
@@ -29,23 +29,25 @@ func items(calls *atomic.Int64, title string) func(context.Context) ([]feed.Item
 	}
 }
 
+// siteOptions is an application with a cached home page whose head takes the
+// feeds' links, plugins, and baseURL as Config.BaseURL.
+func siteOptions(baseURL string, plugins ...collage.Plugin) []collagetest.SiteOption {
+	return []collagetest.SiteOption{
+		collagetest.WithPlugins(plugins...),
+		collagetest.WithoutHome(),
+		collagetest.WithTemplates(map[string]string{"p.html": `<html><head>{{hoist "head"}}</head><body>x</body></html>`}),
+		collagetest.WithRegister(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.BaseURL = baseURL
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+		}),
+	}
+}
+
+// site is an application at https://example.com serving feeds.
 func site(t *testing.T, feeds ...feed.Feed) *collage.App {
 	t.Helper()
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<html><head>{{hoist "head"}}</head><body>x</body></html>`)},
-		}, Root: "t"},
-		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Plugins: []collage.Plugin{feed.New(feeds...)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
-		t.Fatal(err)
-	}
-	return app
+	return collagetest.NewSite(t, siteOptions("https://example.com", feed.New(feeds...))...).App
 }
 
 func get(app *collage.App, path string) *httptest.ResponseRecorder {
@@ -56,7 +58,7 @@ func get(app *collage.App, path string) *httptest.ResponseRecorder {
 
 func TestRSS(t *testing.T) {
 	var calls atomic.Int64
-	app := site(t, feed.Feed{Title: "Blog", Description: "Posts", Language: "en", BaseURL: "https://example.com/", Link: "/blog", Items: items(&calls, "Hello"), Tags: []string{"posts"}})
+	app := site(t, feed.Feed{Title: "Blog", Description: "Posts", Language: "en", Link: "/blog", Items: items(&calls, "Hello"), Tags: []string{"posts"}})
 	rec := get(app, "/feed.xml")
 	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/rss+xml") {
 		t.Fatalf("GET /feed.xml = %d %q", rec.Code, rec.Header().Get("Content-Type"))
@@ -86,7 +88,7 @@ func TestRSS(t *testing.T) {
 
 func TestAtom(t *testing.T) {
 	var calls atomic.Int64
-	app := site(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Link: "/blog", Items: items(&calls, "Hello")})
+	app := site(t, feed.Feed{Title: "Blog", Link: "/blog", Items: items(&calls, "Hello")})
 	rec := get(app, "/atom.xml")
 	body := rec.Body.String()
 	for _, want := range []string{
@@ -111,7 +113,7 @@ func TestAtom(t *testing.T) {
 // A feed is cached until one of its tags is invalidated.
 func TestCachedUntilInvalidated(t *testing.T) {
 	var calls atomic.Int64
-	app := site(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Items: items(&calls, "Hello"), Tags: []string{"posts"}})
+	app := site(t, feed.Feed{Title: "Blog", Items: items(&calls, "Hello"), Tags: []string{"posts"}})
 	get(app, "/feed.xml")
 	get(app, "/feed.xml")
 	if n := calls.Load(); n != 1 {
@@ -129,9 +131,9 @@ func TestCachedUntilInvalidated(t *testing.T) {
 func TestDiscoveryAndFormats(t *testing.T) {
 	var calls atomic.Int64
 	app := site(t,
-		feed.Feed{Name: "blog", Title: `Blog "one"`, BaseURL: "https://example.com", Items: items(&calls, "a")},
-		feed.Feed{Name: "news", Title: "News", BaseURL: "https://example.com", RSS: "/news.xml", Atom: "-", Items: items(&calls, "b")},
-		feed.Feed{Name: "quiet", Title: "Quiet", BaseURL: "https://example.com", RSS: "/quiet.xml", Atom: "/quiet.atom", NoDiscovery: true, Items: items(&calls, "c")},
+		feed.Feed{Name: "blog", Title: `Blog "one"`, Items: items(&calls, "a")},
+		feed.Feed{Name: "news", Title: "News", RSS: "/news.xml", Atom: "-", Items: items(&calls, "b")},
+		feed.Feed{Name: "quiet", Title: "Quiet", RSS: "/quiet.xml", Atom: "/quiet.atom", NoDiscovery: true, Items: items(&calls, "c")},
 	)
 	body := get(app, "/").Body.String()
 	for _, want := range []string{
@@ -156,38 +158,22 @@ func TestDiscoveryAndFormats(t *testing.T) {
 
 func TestLimit(t *testing.T) {
 	var calls atomic.Int64
-	app := site(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Limit: 1, Items: items(&calls, "only")})
+	app := site(t, feed.Feed{Title: "Blog", Limit: 1, Items: items(&calls, "only")})
 	if n := strings.Count(get(app, "/feed.xml").Body.String(), "<item>"); n != 1 {
 		t.Errorf("%d items, want 1", n)
 	}
 }
 
-// A feed with no BaseURL of its own falls back to the application's Config.BaseURL.
-func TestFeed_FallsBackToConfigBaseURL(t *testing.T) {
+// A feed's links are absolute under the application's Config.BaseURL, whatever
+// host the request named.
+func TestFeed_LinksUnderConfigBaseURL(t *testing.T) {
 	var calls atomic.Int64
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<html><head>{{hoist "head"}}</head><body>x</body></html>`)},
-		}, Root: "t"},
-		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		BaseURL: "https://fromconfig.example",
-		Plugins: []collage.Plugin{feed.New(feed.Feed{Title: "Blog", Link: "/blog", Items: items(&calls, "Hello")})}, // no BaseURL of its own
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
-		t.Fatal(err)
-	}
-	rec := get(app, "/feed.xml")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /feed.xml = %d, want 200", rec.Code)
-	}
-	body := rec.Body.String()
+	site := collagetest.NewSite(t, siteOptions("https://fromconfig.example", feed.New(feed.Feed{Title: "Blog", Link: "/blog", Items: items(&calls, "Hello")}))...)
+	body := site.Get("http://other.test/feed.xml").WantStatus(http.StatusOK).Body
 	for _, want := range []string{
 		`<link>https://fromconfig.example/blog</link>`,
 		`<atom:link href="https://fromconfig.example/feed.xml"`,
+		`<link>https://fromconfig.example/blog/hello</link>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("feed lacks %s, want the app's Config.BaseURL\n%s", want, body)
@@ -216,25 +202,10 @@ func oneItem(context.Context) ([]feed.Item, error) {
 	return []feed.Item{{Title: "x", Link: "/x"}}, nil
 }
 
-// hostSite is the site of site(), with a resolver and a feed without a BaseURL,
-// built as an http.Handler.
+// hostSite is an application with no Config.BaseURL, started.
 func hostSite(t *testing.T, plugins ...collage.Plugin) *collage.App {
 	t.Helper()
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<html><head>{{hoist "head"}}</head><body>x</body></html>`)},
-		}, Root: "t"},
-		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Plugins: plugins,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
-		t.Fatal(err)
-	}
-	return app
+	return collagetest.NewSite(t, siteOptions("", plugins...)...).App
 }
 
 func TestFeed_OriginFollowsHost(t *testing.T) {
@@ -252,19 +223,9 @@ func TestFeed_OriginFollowsHost(t *testing.T) {
 
 // Without a resolver or a Config.BaseURL, Init fails with ErrNoBaseURL.
 func TestFeed_NoOriginIsAnError(t *testing.T) {
-	app := hostSite(t, feed.New(feed.Feed{Title: "T", Items: oneItem}))
-	if err := app.Start(); !errors.Is(err, feed.ErrNoBaseURL) {
+	_, err := collagetest.TrySite(t, siteOptions("", feed.New(feed.Feed{Title: "T", Items: oneItem}))...)
+	if !errors.Is(err, feed.ErrNoBaseURL) {
 		t.Fatalf("Start = %v, want ErrNoBaseURL", err)
-	}
-}
-
-// A feed's own BaseURL wins over the host's origin.
-func TestFeed_OwnBaseURLBeatsHostOrigin(t *testing.T) {
-	h := hostSite(t, origins{}, feed.New(feed.Feed{Title: "T", BaseURL: "https://own.example", Items: oneItem})).Handler()
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://a.test/feed.xml", nil))
-	if body := rec.Body.String(); !strings.Contains(body, "https://own.example/x") || strings.Contains(body, "a.example") {
-		t.Errorf("feed = %s, want the feed's own BaseURL", body)
 	}
 }
 
@@ -291,7 +252,7 @@ func TestNoFeedsWarnsOnce(t *testing.T) {
 
 // A feed silences it.
 func TestAFeedDoesNotWarn(t *testing.T) {
-	app, logs := loggedSite(t, feed.Feed{Title: "Blog", BaseURL: "https://example.com", Items: oneItem})
+	app, logs := loggedSite(t, feed.Feed{Title: "Blog", Items: oneItem})
 	get(app, "/feed.xml")
 	if strings.Contains(logs.String(), "no feeds") {
 		t.Errorf("warned with a feed:\n%s", logs.String())

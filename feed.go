@@ -1,20 +1,22 @@
 // Package feed is a collage plugin that serves RSS 2.0 and Atom 1.0 feeds.
 //
 //	app, err := collage.New(&collage.Config{
+//		BaseURL: "https://example.com",
 //		Plugins: []collage.Plugin{feed.New(feed.Feed{
-//			Name:    "blog",
-//			Title:   "The blog",
-//			BaseURL: "https://example.com",
-//			Link:    "/blog",
-//			Items:   latestPosts,
-//			Tags:    []string{"posts"},
+//			Name:  "blog",
+//			Title: "The blog",
+//			Link:  "/blog",
+//			Items: latestPosts,
+//			Tags:  []string{"posts"},
 //		})},
 //	})
 //
 // Each feed is served at /feed.xml as RSS and /atom.xml as Atom unless it says
 // otherwise, and announced in every page's head with <link rel="alternate">, so a
-// reader pointed at any page finds it. A feed is a static document: cached,
-// exported by a static build, and made again when one of its Tags is invalidated.
+// reader pointed at any page finds it. Its links are absolute under the origin
+// collage names for the request's host: an origin resolver's, else
+// Config.BaseURL. A feed is a static document: cached, exported by a static
+// build, and made again when one of its Tags is invalidated.
 package feed
 
 import (
@@ -46,10 +48,6 @@ type Feed struct {
 	Description string
 	// Language is the feed's language, as a BCP 47 tag: "en", "tr".
 	Language string
-	// BaseURL is the site's origin, "https://example.com": a feed's links are
-	// absolute. When empty, links follow the origin collage resolves for the
-	// request's host: a resolver plugin's (elagoht/tenant), else Config.BaseURL.
-	BaseURL string
 	// Link is the path of the page the feed is the feed of: "/blog". Default "/".
 	Link string
 	// RSS and Atom are where the two formats are served. Default "/feed.xml" and
@@ -68,6 +66,8 @@ type Feed struct {
 	NoDiscovery bool
 
 	drops *dropLog
+	// base is the origin the links of one render are absolute under.
+	base string
 }
 
 // Item is one entry of a feed.
@@ -107,12 +107,13 @@ type Plugin struct {
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.4" }
+func (p *Plugin) Version() string                { return "0.3.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
-// ErrNoBaseURL is returned by Init for a feed with an invalid BaseURL, or with none
-// when collage can resolve no origin; and by a render that finds none.
-var ErrNoBaseURL = errors.New("feed: BaseURL is required: a feed's links are absolute")
+// ErrNoBaseURL is returned by Init when collage can name no origin — no
+// Config.BaseURL and no origin resolver — and by a render that finds none: a
+// feed's links are absolute.
+var ErrNoBaseURL = errors.New("feed: no origin for a feed's absolute links: set Config.BaseURL (BASE_URL) or register an origin resolver")
 
 // ErrUnsafeLink is returned by Init for a feed whose Link, RSS or Atom is neither
 // a path on the site nor an http or https URL.
@@ -150,14 +151,9 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 				return fmt.Errorf("%w (feed %q)", ErrUnsafeLink, f.Name)
 			}
 		}
-		// The feed's own BaseURL wins; without one, links follow the origin
-		// collage resolves for the request's host, read per render.
-		if f.BaseURL != "" {
-			base, err := url.Parse(f.BaseURL)
-			if err != nil || base.Scheme == "" || base.Host == "" {
-				return fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
-			}
-		} else if !canResolve(host) {
+		// Links follow the origin collage resolves for the request's host,
+		// read per render.
+		if !canResolve(host) {
 			return fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
 		}
 		if f.Items == nil {
@@ -200,21 +196,18 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	return nil
 }
 
-// at is the feed with its links absolute against rc's origin: its own BaseURL,
-// or collage's for the request's host.
+// at is the feed with its links absolute against the origin collage names for
+// rc's host.
 func (f Feed) at(rc *collage.RenderContext) (Feed, error) {
-	if f.BaseURL == "" {
-		f.BaseURL = collage.BaseURL(rc)
-		if f.BaseURL == "" {
-			return f, fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
-		}
+	f.base = collage.BaseURL(rc)
+	if f.base == "" {
+		return f, fmt.Errorf("%w (feed %q)", ErrNoBaseURL, f.Name)
 	}
 	return f, nil
 }
 
-// canResolve reports whether collage can name an origin without the plugin's
-// own BaseURL: from Config.BaseURL, or per host from a plugin implementing
-// collage.OriginResolver.
+// canResolve reports whether collage can name an origin: from Config.BaseURL,
+// or per host from a plugin implementing collage.OriginResolver.
 func canResolve(host collage.Host) bool {
 	if host.BaseURL() != "" {
 		return true
@@ -230,7 +223,6 @@ func docName(feed, format string) string {
 }
 
 func (f *Feed) defaults() {
-	f.BaseURL = strings.TrimSuffix(f.BaseURL, "/")
 	if f.Link == "" {
 		f.Link = "/"
 	}
@@ -282,7 +274,7 @@ func (f Feed) render(ctx context.Context, format func([]Item) ([]byte, error)) (
 }
 
 // link returns a link as the feed writes it: a path on the site made absolute
-// against BaseURL, or an absolute http or https URL. Any other link — a
+// against the render's origin, or an absolute http or https URL. Any other link — a
 // javascript:, data: or file: URL, however its scheme is spelled, or one that does
 // not parse — is "", and logged once for item.
 func (f Feed) link(item, link string) string {
@@ -297,7 +289,7 @@ func (f Feed) link(item, link string) string {
 	if !strings.HasPrefix(clean, "/") {
 		clean = "/" + clean
 	}
-	return f.BaseURL + clean
+	return f.base + clean
 }
 
 // id returns the item's id and whether it is its link. An explicit ID is kept
@@ -326,7 +318,7 @@ func (f Feed) id(item Item, link string) (string, bool) {
 
 // checkLink reports whether link may be written, and how: an absolute http or
 // https URL, returned as clean with its scheme, or a reference with no scheme,
-// returned as clean with scheme "", for the caller to resolve against BaseURL.
+// returned as clean with scheme "", for the caller to resolve against the origin.
 //
 // The scheme is found the way a browser finds it, not the way url.Parse does:
 // leading and trailing spaces and control characters are trimmed and every
