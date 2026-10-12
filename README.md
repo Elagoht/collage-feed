@@ -127,6 +127,10 @@ Feeds are configured in Go, since `Items` is a function.
 
 ## Changes
 
+### v0.2.4
+
+- Rebuilt against collage v0.60.0 (`host.MultiOrigin()` replaces the `collage.Origins` assertion). Requires collage v0.60.0.
+
 ### v0.2.3
 
 - With no feeds, as `collage plugin add` writes `feed.New()`, `Init` logs one
