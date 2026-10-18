@@ -39,7 +39,9 @@ func siteOptions(baseURL string, plugins ...collage.Plugin) []collagetest.SiteOp
 		collagetest.WithRegister(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()),
 		collagetest.WithConfig(func(c *collage.Config) {
 			c.BaseURL = baseURL
-			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+			// Warming off: an invalidation re-renders a feed in the background, which
+			// would race the request that counts the renders after it.
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour, WarmLimit: -1}
 		}),
 	}
 }
