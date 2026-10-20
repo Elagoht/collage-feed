@@ -107,7 +107,7 @@ type Plugin struct {
 func New(feeds ...Feed) *Plugin { return &Plugin{feeds: feeds} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.3.1" }
+func (p *Plugin) Version() string                { return "0.3.2" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // ErrNoBaseURL is returned by Init when collage can name no origin — no

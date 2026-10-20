@@ -3,5 +3,5 @@
   "name": "elagoht/feed",
   "description": "A collage plugin that serves RSS 2.0 and Atom 1.0 feeds.",
   "repository": "https://github.com/Elagoht/collage-feed",
-  "setup": "Feeds are Go values: give them to `feed.New(...)` in `plugins.go`, each with its `Items` function. Their links are absolute under `Config.BaseURL` (`BASE_URL`) or an origin resolver's origins; without either the application does not start."
+  "setup": "Serves nothing until it has a feed: in `plugins.go`, replace `feed.New()` with `feed.New(feed.Feed{Title: \"Blog\", Link: \"/\", Items: posts})`, where `posts` is a `func(ctx context.Context) ([]feed.Item, error)` returning `feed.Item{Title: …, Link: \"/blog/\" + slug, Published: …}`.\nWith elagoht/markdown, make the items from `md.List(ctx, \"\")`.\nSet `BASE_URL=https://your.site` where production runs, or the application does not start (`collage dev` sets it for you)."
 }
